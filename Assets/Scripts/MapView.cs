@@ -1,38 +1,55 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.Networking;
 using UnityEngine.UI;
 
 /// <summary>
-/// Top-down street map built from MapTiler raster tiles, centered on a latitude/longitude.
+/// Top-down street map built from MapTiler raster tiles.
 /// Put this on a UI object under a Canvas; it creates its tiles, player marker and
-/// attribution label at runtime. Call <see cref="SetCenter"/> whenever the GPS position changes.
+/// attribution label at runtime. Call <see cref="SetPlayerLocation"/> whenever the GPS position changes.
 /// The map fills whatever size its RectTransform has (a small corner minimap or the whole
 /// screen) and adapts if that size changes at runtime.
+/// Drag to move the map, pinch or use the mouse wheel to zoom. Dragging stops the map from
+/// following the player until <see cref="Recenter"/> is called.
 /// </summary>
 [RequireComponent(typeof(RectTransform))]
-public class MapView : MonoBehaviour
+public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, IDragHandler, IScrollHandler
 {
     // The key is read from Assets/Resources/MapTilerKey.txt, which is ignored by git.
     const string KeyResourceName = "MapTilerKey";
     const string KeyPlaceholder = "PASTE_YOUR_MAPTILER_KEY_HERE";
     const int MaxCachedTiles = 100;
+    const int MaxTileZoom = 22;
     static readonly Vector3Int NoTile = new(-1, -1, -1);
     static readonly Color LoadingColor = new(0.9f, 0.9f, 0.88f);
 
     [Tooltip("Raster tile URL. {z}, {x}, {y} and {key} are filled in at runtime.")]
     public string urlTemplate = "https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key={key}";
 
-    [Tooltip("16 = neighbourhood, 17 = a few streets, 18 = individual buildings")]
-    [Range(3, 20)] public int zoom = 17;
+    [Header("Zoom")]
+    [Tooltip("Current zoom: 16 = neighbourhood, 17 = a few streets, 18 = individual buildings. Pinching changes it.")]
+    [Range(1, MaxTileZoom)] public float zoom = 17f;
+    [Range(1, MaxTileZoom)] public int minZoom = 3;
+    [Range(1, MaxTileZoom)] public int maxZoom = 19;
 
-    [Tooltip("Size of one tile on screen, in canvas units")]
+    [Tooltip("Size of one tile on screen at a whole zoom level, in canvas units")]
     [Min(32)] public float tileDisplaySize = 384f;
 
-    public Color playerMarkerColor = new(0.9f, 0.15f, 0.15f);
+    [Header("Touch / mouse")]
+    public bool allowPan = true;
+    public bool allowZoom = true;
+    [Tooltip("Zoom levels per mouse-wheel notch")]
+    [Min(0)] public float scrollZoomSpeed = 0.25f;
+    [Tooltip("After the map is dragged away from the player, follow the player again after this many " +
+             "seconds without touching the map. 0 = only when Recenter() is called.")]
+    [Min(0)] public float autoRecenterSeconds = 0f;
 
+    [Header("Player marker")]
+    public Color playerMarkerColor = new(0.9f, 0.15f, 0.15f);
     [Tooltip("Width/height of the player marker, in canvas units")]
     [Min(4)] public float playerMarkerSize = 24f;
 
@@ -41,13 +58,20 @@ public class MapView : MonoBehaviour
     public double previewLatitude = 48.8584;
     public double previewLongitude = 2.2945;
 
+    /// <summary>True while the map keeps the player in the middle; false after the map was dragged away.</summary>
+    public bool IsFollowingPlayer { get; private set; } = true;
+
     string apiKey;
     bool ready;
     RectTransform rect;
     RectTransform tileLayer;
+    RectTransform marker;
 
-    double centerLat, centerLon;
-    bool hasCenter;
+    // Positions on the whole-world map (0..1, see MapTiles.LatLonToWorld).
+    double playerX, playerY;
+    bool hasPlayer;
+    double viewX, viewY; // the point shown in the middle of the map
+    bool hasView;
 
     // One RawImage per grid cell, and the tile (x, y, zoom) each cell is showing.
     readonly List<RawImage> slots = new();
@@ -61,12 +85,21 @@ public class MapView : MonoBehaviour
     readonly HashSet<Vector3Int> loading = new();
     bool loggedDownloadError;
 
-    /// <summary>Moves the map so this latitude/longitude is in the middle, under the player marker.</summary>
-    public void SetCenter(double latitude, double longitude)
+    // Fingers (or the mouse) currently pressed on the map, by pointer id, in map-local coordinates.
+    readonly Dictionary<int, Vector2> pointers = new();
+    float lastInteractionTime;
+
+    /// <summary>Updates where the player marker is. While following, the map moves along with it.</summary>
+    public void SetPlayerLocation(double latitude, double longitude)
     {
-        centerLat = latitude;
-        centerLon = longitude;
-        hasCenter = true;
+        (playerX, playerY) = MapTiles.LatLonToWorld(latitude, longitude);
+        hasPlayer = true;
+    }
+
+    /// <summary>Moves the map back to the player and keeps following them. Hook a "recenter" button to this.</summary>
+    public void Recenter()
+    {
+        IsFollowingPlayer = true;
     }
 
     void Awake()
@@ -74,6 +107,10 @@ public class MapView : MonoBehaviour
         rect = (RectTransform)transform;
         if (!TryGetComponent<RectMask2D>(out _))
             gameObject.AddComponent<RectMask2D>();
+
+        // Touch and mouse events only reach this object if it has a raycast target.
+        if (!TryGetComponent<Graphic>(out _))
+            gameObject.AddComponent<Image>().color = Color.clear;
 
         tileLayer = CreateChild("Tiles", transform);
         tileLayer.SetAsFirstSibling();
@@ -90,22 +127,54 @@ public class MapView : MonoBehaviour
     void Start()
     {
 #if UNITY_EDITOR
-        if (previewInEditor && !hasCenter)
-            SetCenter(previewLatitude, previewLongitude);
+        if (previewInEditor && !hasPlayer)
+            SetPlayerLocation(previewLatitude, previewLongitude);
 #endif
+    }
+
+    void OnValidate()
+    {
+        maxZoom = Mathf.Max(minZoom, maxZoom);
+        zoom = Mathf.Clamp(zoom, minZoom, maxZoom);
+    }
+
+    void OnDisable()
+    {
+        pointers.Clear();
     }
 
     void LateUpdate()
     {
-        if (!ready || !hasCenter)
+        if (!ready)
             return;
 
-        var (fx, fy) = MapTiles.LatLonToTile(centerLat, centerLon, zoom);
-        var center = new Vector2Int((int)System.Math.Floor(fx), (int)System.Math.Floor(fy));
+        if (!IsFollowingPlayer && autoRecenterSeconds > 0f && pointers.Count == 0 &&
+            Time.unscaledTime - lastInteractionTime >= autoRecenterSeconds)
+            IsFollowingPlayer = true;
 
-        // Enough tiles to cover this RectTransform, wherever inside the center tile the player is.
-        int cols = Mathf.CeilToInt(rect.rect.width / (2f * tileDisplaySize));
-        int rows = Mathf.CeilToInt(rect.rect.height / (2f * tileDisplaySize));
+        if (IsFollowingPlayer && hasPlayer)
+        {
+            viewX = playerX;
+            viewY = playerY;
+            hasView = true;
+        }
+
+        marker.gameObject.SetActive(hasPlayer && hasView);
+        if (!hasView)
+            return;
+
+        // Tiles only exist for whole zoom levels; in-between zooms scale the nearest level by up to ±41%.
+        zoom = Mathf.Clamp(zoom, minZoom, maxZoom);
+        int tileZoom = Mathf.Clamp(Mathf.RoundToInt(zoom), minZoom, maxZoom);
+        float scale = Mathf.Pow(2f, zoom - tileZoom);
+        double n = 1 << tileZoom;
+        double fx = viewX * n, fy = viewY * n;
+        var center = new Vector2Int((int)Math.Floor(fx), (int)Math.Floor(fy));
+
+        // Enough tiles to cover this RectTransform, even when tiles are shown at their smallest.
+        float smallestTile = tileDisplaySize * 0.7071f;
+        int cols = Mathf.CeilToInt(rect.rect.width / (2f * smallestTile));
+        int rows = Mathf.CeilToInt(rect.rect.height / (2f * smallestTile));
         if (cols != halfCols || rows != halfRows || !Mathf.Approximately(tileDisplaySize, builtTileSize))
         {
             halfCols = cols;
@@ -115,18 +184,143 @@ public class MapView : MonoBehaviour
             centerZoom = -1;
         }
 
-        if (center != centerTile || zoom != centerZoom)
+        if (center != centerTile || tileZoom != centerZoom)
         {
             centerTile = center;
-            centerZoom = zoom;
+            centerZoom = tileZoom;
             AssignTiles();
         }
 
-        // Shift the whole grid so the player's exact position sits at the middle of the map.
+        // Scale and shift the whole grid so the view point sits at the middle of the map.
+        float size = tileDisplaySize * scale;
+        tileLayer.localScale = new Vector3(scale, scale, 1f);
         tileLayer.anchoredPosition = new Vector2(
-            (float)(-(fx - center.x) * tileDisplaySize),
-            (float)((fy - center.y) * tileDisplaySize));
+            (float)(-(fx - center.x) * size),
+            (float)((fy - center.y) * size));
+
+        if (hasPlayer)
+            marker.anchoredPosition = WorldToLocal(playerX, playerY);
     }
+
+    // ---- Touch / mouse input ----
+
+    public void OnPointerDown(PointerEventData e)
+    {
+        if (e.button != PointerEventData.InputButton.Left)
+            return;
+        pointers[e.pointerId] = ToLocal(e);
+        lastInteractionTime = Time.unscaledTime;
+    }
+
+    public void OnPointerUp(PointerEventData e)
+    {
+        pointers.Remove(e.pointerId);
+        lastInteractionTime = Time.unscaledTime;
+    }
+
+    public void OnDrag(PointerEventData e)
+    {
+        if (!hasView || !pointers.TryGetValue(e.pointerId, out var previous))
+            return;
+
+        var current = ToLocal(e);
+        pointers[e.pointerId] = current;
+        lastInteractionTime = Time.unscaledTime;
+
+        if (pointers.Count == 1)
+        {
+            if (allowPan)
+                Pan(current - previous);
+            return;
+        }
+
+        // Two fingers: spreading/pinching zooms, moving both together pans.
+        int otherId = e.pointerId;
+        foreach (var id in pointers.Keys)
+        {
+            if (id != e.pointerId)
+            {
+                otherId = id;
+                break;
+            }
+        }
+
+        var other = pointers[otherId];
+        float distanceBefore = Vector2.Distance(previous, other);
+        float distanceAfter = Vector2.Distance(current, other);
+        var middleBefore = (previous + other) * 0.5f;
+        var middleAfter = (current + other) * 0.5f;
+
+        // While following the player, zoom around the player instead of between the fingers.
+        if (allowZoom && distanceBefore > 1f && distanceAfter > 1f)
+            ZoomAround(IsFollowingPlayer ? Vector2.zero : middleBefore, Mathf.Log(distanceAfter / distanceBefore, 2f));
+        if (allowPan && !IsFollowingPlayer)
+            Pan(middleAfter - middleBefore);
+    }
+
+    public void OnScroll(PointerEventData e)
+    {
+        if (!allowZoom || !hasView)
+            return;
+
+        float notches = Mathf.Clamp(e.scrollDelta.y, -1f, 1f);
+        ZoomAround(IsFollowingPlayer ? Vector2.zero : ToLocal(e), notches * scrollZoomSpeed);
+        lastInteractionTime = Time.unscaledTime;
+    }
+
+    void Pan(Vector2 delta)
+    {
+        if (delta == Vector2.zero)
+            return;
+
+        IsFollowingPlayer = false;
+        double worldPerUnit = WorldPerCanvasUnit(zoom);
+        viewX -= delta.x * worldPerUnit;
+        viewY += delta.y * worldPerUnit;
+        ClampView();
+    }
+
+    /// <summary>Zooms by <paramref name="levels"/> while keeping the map point under <paramref name="local"/> in place.</summary>
+    void ZoomAround(Vector2 local, float levels)
+    {
+        float newZoom = Mathf.Clamp(zoom + levels, minZoom, maxZoom);
+        if (Mathf.Approximately(newZoom, zoom))
+            return;
+
+        double change = WorldPerCanvasUnit(zoom) - WorldPerCanvasUnit(newZoom);
+        viewX += local.x * change;
+        viewY -= local.y * change;
+        zoom = newZoom;
+        ClampView();
+    }
+
+    double WorldPerCanvasUnit(float atZoom) => 1.0 / (tileDisplaySize * Math.Pow(2.0, atZoom));
+
+    void ClampView()
+    {
+        viewX -= Math.Floor(viewX); // wrap around at longitude ±180
+        viewY = Math.Max(0.0, Math.Min(1.0, viewY));
+    }
+
+    /// <summary>Converts a whole-world map position to a position relative to the middle of this map.</summary>
+    Vector2 WorldToLocal(double worldX, double worldY)
+    {
+        double unitsPerWorld = 1.0 / WorldPerCanvasUnit(zoom);
+        double dx = worldX - viewX;
+        if (dx > 0.5) dx -= 1.0; // take the short way around the date line
+        else if (dx < -0.5) dx += 1.0;
+        return new Vector2((float)(dx * unitsPerWorld), (float)(-(worldY - viewY) * unitsPerWorld));
+    }
+
+    /// <summary>Pointer position relative to the middle of this map, in canvas units.</summary>
+    Vector2 ToLocal(PointerEventData e)
+    {
+        var cam = e.pressEventCamera != null ? e.pressEventCamera : e.enterEventCamera;
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(rect, e.position, cam, out var local);
+        return local - rect.rect.center;
+    }
+
+    // ---- Tiles ----
 
     void RebuildSlots()
     {
@@ -152,7 +346,7 @@ public class MapView : MonoBehaviour
 
     void AssignTiles()
     {
-        int n = 1 << zoom;
+        int n = 1 << centerZoom;
         int i = 0;
         for (int dy = -halfRows; dy <= halfRows; dy++)
         for (int dx = -halfCols; dx <= halfCols; dx++, i++)
@@ -168,7 +362,7 @@ public class MapView : MonoBehaviour
             }
 
             int x = ((centerTile.x + dx) % n + n) % n; // wrap around at longitude ±180
-            var tile = new Vector3Int(x, y, zoom);
+            var tile = new Vector3Int(x, y, centerZoom);
             slotTiles[i] = tile;
             image.enabled = true;
 
@@ -256,17 +450,19 @@ public class MapView : MonoBehaviour
         cache.Clear();
     }
 
+    // ---- Overlays ----
+
     void CreatePlayerMarker()
     {
-        var rt = CreateChild("Player Marker", transform);
-        rt.sizeDelta = new Vector2(playerMarkerSize, playerMarkerSize);
-        rt.localRotation = Quaternion.Euler(0f, 0f, 45f);
+        marker = CreateChild("Player Marker", transform);
+        marker.sizeDelta = new Vector2(playerMarkerSize, playerMarkerSize);
+        marker.localRotation = Quaternion.Euler(0f, 0f, 45f);
 
-        var image = rt.gameObject.AddComponent<Image>();
+        var image = marker.gameObject.AddComponent<Image>();
         image.color = playerMarkerColor;
         image.raycastTarget = false;
 
-        var outline = rt.gameObject.AddComponent<Outline>();
+        var outline = marker.gameObject.AddComponent<Outline>();
         outline.effectColor = Color.white;
         outline.effectDistance = new Vector2(3f, 3f);
     }

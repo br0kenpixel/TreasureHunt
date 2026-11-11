@@ -33,7 +33,7 @@ public class GpsDemoSceneLogic : MonoBehaviour
                 var location = geoSvc.GetLocation();
                 debugText.SetText($"Running:\nlat={location.Latitude}°,\nlon={location.Longitude}°,\nacc=±{location.AccuracyMeters}m");
                 if (mapView != null)
-                    mapView.SetCenter(location.Latitude, location.Longitude);
+                    mapView.SetPlayerLocation(location.Latitude, location.Longitude);
                 break;
             case LocationServiceStatus.Stopped:
                 debugText.SetText("Stopped");
