@@ -14,7 +14,8 @@ using UnityEngine.UI;
 /// The map fills whatever size its RectTransform has (a small corner minimap or the whole
 /// screen) and adapts if that size changes at runtime.
 /// Drag to move the map, pinch or use the mouse wheel to zoom. Dragging stops the map from
-/// following the player until <see cref="Recenter"/> is called.
+/// following the player until <see cref="Recenter"/> or <see cref="ResetView"/> is called.
+/// Use <see cref="AddMarker"/> and <see cref="RemoveMarker"/> to show places such as treasures.
 /// </summary>
 [RequireComponent(typeof(RectTransform))]
 public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, IDragHandler, IScrollHandler
@@ -53,6 +54,11 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
     [Tooltip("Width/height of the player marker, in canvas units")]
     [Min(4)] public float playerMarkerSize = 24f;
 
+    [Header("Markers added with AddMarker")]
+    public Color markerColor = new(1f, 0.76f, 0.1f);
+    [Tooltip("Diameter of a marker, in canvas units")]
+    [Min(4)] public float markerSize = 26f;
+
     [Header("Editor preview (GPS doesn't work in the Editor)")]
     public bool previewInEditor = true;
     public double previewLatitude = 48.8584;
@@ -61,14 +67,18 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
     /// <summary>True while the map keeps the player in the middle; false after the map was dragged away.</summary>
     public bool IsFollowingPlayer { get; private set; } = true;
 
+    bool built;
     string apiKey;
     bool ready;
+    float defaultZoom;
     RectTransform rect;
     RectTransform tileLayer;
-    RectTransform marker;
+    RectTransform markerLayer;
+    RectTransform playerMarker;
 
     // Positions on the whole-world map (0..1, see MapTiles.LatLonToWorld).
     double playerX, playerY;
+    double playerLatitude, playerLongitude;
     bool hasPlayer;
     double viewX, viewY; // the point shown in the middle of the map
     bool hasView;
@@ -89,11 +99,34 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
     readonly Dictionary<int, Vector2> pointers = new();
     float lastInteractionTime;
 
+    sealed class Marker
+    {
+        public double Latitude, Longitude;
+        public double WorldX, WorldY;
+        public RectTransform Rect;
+    }
+
+    readonly List<Marker> markers = new();
+    static Sprite circleSprite;
+
     /// <summary>Updates where the player marker is. While following, the map moves along with it.</summary>
     public void SetPlayerLocation(double latitude, double longitude)
     {
+        playerLatitude = latitude;
+        playerLongitude = longitude;
         (playerX, playerY) = MapTiles.LatLonToWorld(latitude, longitude);
         hasPlayer = true;
+    }
+
+    /// <summary>
+    /// The last location passed to <see cref="SetPlayerLocation"/> (in the Editor, the preview location).
+    /// Returns false if the player's location isn't known yet.
+    /// </summary>
+    public bool TryGetPlayerLocation(out double latitude, out double longitude)
+    {
+        latitude = playerLatitude;
+        longitude = playerLongitude;
+        return hasPlayer;
     }
 
     /// <summary>Moves the map back to the player and keeps following them. Hook a "recenter" button to this.</summary>
@@ -102,8 +135,80 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
         IsFollowingPlayer = true;
     }
 
+    /// <summary>Goes back to the zoom the map started with, centered on and following the player.</summary>
+    public void ResetView()
+    {
+        Build();
+        zoom = defaultZoom;
+        IsFollowingPlayer = true;
+    }
+
+    /// <summary>
+    /// Places a marker at a latitude/longitude. Returns the marker's RectTransform, so you can change its look
+    /// (e.g. <c>GetComponent&lt;Image&gt;().color</c>) or add your own UI objects to it as children.
+    /// </summary>
+    public RectTransform AddMarker(double latitude, double longitude)
+    {
+        Build();
+
+        var rt = CreateChild("Marker", markerLayer);
+        rt.sizeDelta = new Vector2(markerSize, markerSize);
+
+        var image = rt.gameObject.AddComponent<Image>();
+        image.sprite = CircleSprite();
+        image.color = markerColor;
+        image.raycastTarget = false;
+
+        var outline = rt.gameObject.AddComponent<Outline>();
+        outline.effectColor = new Color(0f, 0f, 0f, 0.6f);
+        outline.effectDistance = new Vector2(2f, 2f);
+
+        var (worldX, worldY) = MapTiles.LatLonToWorld(latitude, longitude);
+        markers.Add(new Marker
+        {
+            Latitude = latitude,
+            Longitude = longitude,
+            WorldX = worldX,
+            WorldY = worldY,
+            Rect = rt,
+        });
+        return rt;
+    }
+
+    /// <summary>
+    /// Removes the marker at a latitude/longitude. Every marker within <paramref name="toleranceMeters"/> of that
+    /// point is removed, so small rounding differences (e.g. float vs double) don't matter.
+    /// Returns true if a marker was removed.
+    /// </summary>
+    public bool RemoveMarker(double latitude, double longitude, double toleranceMeters = 1.0)
+    {
+        bool removed = false;
+        for (int i = markers.Count - 1; i >= 0; i--)
+        {
+            var m = markers[i];
+            if (GeoMath.DistanceMeters(latitude, longitude, m.Latitude, m.Longitude) > toleranceMeters)
+                continue;
+
+            if (m.Rect != null)
+                Destroy(m.Rect.gameObject);
+            markers.RemoveAt(i);
+            removed = true;
+        }
+        return removed;
+    }
+
     void Awake()
     {
+        Build();
+    }
+
+    /// <summary>Creates the map's child objects and reads the API key. Runs once, even if called again.</summary>
+    void Build()
+    {
+        if (built)
+            return;
+        built = true;
+
         rect = (RectTransform)transform;
         if (!TryGetComponent<RectMask2D>(out _))
             gameObject.AddComponent<RectMask2D>();
@@ -114,8 +219,12 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
 
         tileLayer = CreateChild("Tiles", transform);
         tileLayer.SetAsFirstSibling();
+        markerLayer = CreateChild("Markers", transform);
+        markerLayer.SetSiblingIndex(1); // above the tiles, below the player marker
+        markerLayer.gameObject.SetActive(false); // shown once the map knows where it is
         CreatePlayerMarker();
         CreateAttribution();
+        defaultZoom = Mathf.Clamp(zoom, minZoom, maxZoom);
 
         var keyAsset = Resources.Load<TextAsset>(KeyResourceName);
         apiKey = keyAsset != null ? keyAsset.text.Trim() : "";
@@ -159,7 +268,8 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
             hasView = true;
         }
 
-        marker.gameObject.SetActive(hasPlayer && hasView);
+        playerMarker.gameObject.SetActive(hasPlayer && hasView);
+        markerLayer.gameObject.SetActive(hasView);
         if (!hasView)
             return;
 
@@ -199,7 +309,13 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
             (float)((fy - center.y) * size));
 
         if (hasPlayer)
-            marker.anchoredPosition = WorldToLocal(playerX, playerY);
+            playerMarker.anchoredPosition = WorldToLocal(playerX, playerY);
+
+        foreach (var m in markers)
+        {
+            if (m.Rect != null)
+                m.Rect.anchoredPosition = WorldToLocal(m.WorldX, m.WorldY);
+        }
     }
 
     // ---- Touch / mouse input ----
@@ -454,15 +570,15 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
 
     void CreatePlayerMarker()
     {
-        marker = CreateChild("Player Marker", transform);
-        marker.sizeDelta = new Vector2(playerMarkerSize, playerMarkerSize);
-        marker.localRotation = Quaternion.Euler(0f, 0f, 45f);
+        playerMarker = CreateChild("Player Marker", transform);
+        playerMarker.sizeDelta = new Vector2(playerMarkerSize, playerMarkerSize);
+        playerMarker.localRotation = Quaternion.Euler(0f, 0f, 45f);
 
-        var image = marker.gameObject.AddComponent<Image>();
+        var image = playerMarker.gameObject.AddComponent<Image>();
         image.color = playerMarkerColor;
         image.raycastTarget = false;
 
-        var outline = marker.gameObject.AddComponent<Outline>();
+        var outline = playerMarker.gameObject.AddComponent<Outline>();
         outline.effectColor = Color.white;
         outline.effectDistance = new Vector2(3f, 3f);
     }
@@ -487,6 +603,31 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
         text.color = new Color(0.2f, 0.2f, 0.2f);
         text.alignment = TextAlignmentOptions.BottomRight;
         text.raycastTarget = false;
+    }
+
+    /// <summary>A white circle with smooth edges, drawn in code so no image asset is needed.</summary>
+    static Sprite CircleSprite()
+    {
+        if (circleSprite != null)
+            return circleSprite;
+
+        const int size = 64;
+        float radius = size / 2f;
+        var center = new Vector2(radius, radius);
+        var pixels = new Color32[size * size];
+        for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++)
+        {
+            float distance = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), center);
+            byte alpha = (byte)(Mathf.Clamp01(radius - distance) * 255f);
+            pixels[y * size + x] = new Color32(255, 255, 255, alpha);
+        }
+
+        var texture = new Texture2D(size, size, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp };
+        texture.SetPixels32(pixels);
+        texture.Apply(false, true);
+        circleSprite = Sprite.Create(texture, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+        return circleSprite;
     }
 
     static RectTransform CreateChild(string name, Transform parent)

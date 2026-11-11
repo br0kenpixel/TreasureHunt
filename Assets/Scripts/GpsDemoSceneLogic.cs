@@ -1,3 +1,4 @@
+using System.Collections;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -8,6 +9,10 @@ public class GpsDemoSceneLogic : MonoBehaviour
     public TMP_Text debugText;
     public MapView mapView;
 
+    public int randomPointCount = 5;
+    public float randomPointMinMeters = 30f;
+    public float randomPointMaxMeters = 150f;
+
     private GeolocationService geoSvc;
 
     void Start()
@@ -15,7 +20,27 @@ public class GpsDemoSceneLogic : MonoBehaviour
         debugText.SetText("Starting...");
         if (mapView == null)
             mapView = FindAnyObjectByType<MapView>();
+
+        StartCoroutine(PlaceRandomPointsAroundPlayer());
         geoSvc = new();
+    }
+
+    IEnumerator PlaceRandomPointsAroundPlayer()
+    {
+        // wait for gps to start
+        yield return new WaitForSeconds(10);
+
+        var location = geoSvc.GetLocation();
+
+        float minSquared = randomPointMinMeters * randomPointMinMeters;
+        float maxSquared = randomPointMaxMeters * randomPointMaxMeters;
+        for (int i = 0; i < randomPointCount; i++)
+        {
+            float bearing = Random.Range(0f, 360f);
+            float distance = Mathf.Sqrt(Random.Range(minSquared, maxSquared));
+            var (pointLatitude, pointLongitude) = GeoMath.Offset(location.Latitude, location.Longitude, distance, bearing);
+            mapView.AddMarker(pointLatitude, pointLongitude);
+        }
     }
 
     // Update is called once per frame
@@ -39,6 +64,11 @@ public class GpsDemoSceneLogic : MonoBehaviour
                 debugText.SetText("Stopped");
                 break;
         }
+    }
+
+    public void ResetMapView()
+    {
+        mapView.ResetView();
     }
 
     void OnDestroy()
