@@ -136,3 +136,7 @@ crashlytics-build.properties
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# MapTiler API key (read at runtime by MapView; keep it out of git)
+/[Aa]ssets/Resources/MapTilerKey.txt
+/[Aa]ssets/Resources/MapTilerKey.txt.meta

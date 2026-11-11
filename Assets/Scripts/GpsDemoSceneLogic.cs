@@ -6,12 +6,15 @@ using UnityEngine.UI;
 public class GpsDemoSceneLogic : MonoBehaviour
 {
     public TMP_Text debugText;
+    public MapView mapView;
 
     private GeolocationService geoSvc;
 
     void Start()
     {
         debugText.SetText("Starting...");
+        if (mapView == null)
+            mapView = FindAnyObjectByType<MapView>();
         geoSvc = new();
     }
 
@@ -29,6 +32,8 @@ public class GpsDemoSceneLogic : MonoBehaviour
             case LocationServiceStatus.Running:
                 var location = geoSvc.GetLocation();
                 debugText.SetText($"Running:\nlat={location.Latitude}°,\nlon={location.Longitude}°,\nacc=±{location.AccuracyMeters}m");
+                if (mapView != null)
+                    mapView.SetCenter(location.Latitude, location.Longitude);
                 break;
             case LocationServiceStatus.Stopped:
                 debugText.SetText("Stopped");
