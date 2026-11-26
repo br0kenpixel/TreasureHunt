@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 public class GeolocationBasedItemSpawner : IItemSpawner
 {
-    private const int MAX_SPAWN_DISTANCE_METERS = 100;
+    private const int MAX_SPAWN_DISTANCE_METERS = 50;
     private const int MIN_SPAWN_DISTANCE_METERS = 10;
     private const double EARTH_RADIUS_METERS = 6378137.0;
 

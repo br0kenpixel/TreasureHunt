@@ -25,34 +25,16 @@ public class GpsDemoSceneLogic : MonoBehaviour
         if (mapView == null)
             mapView = FindAnyObjectByType<MapView>();
 
-        StartCoroutine(PlaceRandomPointsAroundPlayer());
         geoSvc = new();
         itemSpawner = new GeolocationBasedItemSpawner(geoSvc);
 
-        Invoke(nameof(GenerateMapPoints), 5f);
+        Invoke(nameof(GenerateMapPoints), 10f);
     }
 
-    IEnumerator PlaceRandomPointsAroundPlayer()
-    {
-        // wait for gps to start
-        yield return new WaitForSeconds(10);
-
-        var location = geoSvc.GetLocation();
-
-        float minSquared = randomPointMinMeters * randomPointMinMeters;
-        float maxSquared = randomPointMaxMeters * randomPointMaxMeters;
-        for (int i = 0; i < randomPointCount; i++)
-        {
-            float bearing = Random.Range(0f, 360f);
-            float distance = Mathf.Sqrt(Random.Range(minSquared, maxSquared));
-            var (pointLatitude, pointLongitude) = GeoMath.Offset(location.Latitude, location.Longitude, distance, bearing);
-
-        }
-    }
-
-    // Update is called once per frame
     void Update()
     {
+        var location = geoSvc.GetLocation();
+
         switch (geoSvc.GetStatus())
         {
             case LocationServiceStatus.Failed:
@@ -62,7 +44,6 @@ public class GpsDemoSceneLogic : MonoBehaviour
                 debugText.SetText("Initializing...");
                 break;
             case LocationServiceStatus.Running:
-                var location = geoSvc.GetLocation();
                 debugText.SetText($"Running:\nlat={location.Latitude}°,\nlon={location.Longitude}°,\nacc=±{location.AccuracyMeters}m");
                 if (mapView != null)
                     mapView.SetPlayerLocation(location.Latitude, location.Longitude);
@@ -71,13 +52,22 @@ public class GpsDemoSceneLogic : MonoBehaviour
                     debugText.text += "\nItems:";
                     items.ForEach(i =>
                     {
-                        debugText.text += $"\n- {i}";
+                        debugText.text += $"\n- {i} ({i.DistanceFromMeters(location):F0}m away)";
                     });
                 }
                 break;
             case LocationServiceStatus.Stopped:
                 debugText.SetText("Stopped");
                 break;
+        }
+
+        foreach (var item in items)
+        {
+            if (item.DistanceFromMeters(location) < 10)
+            {
+                mapView.RemoveMarker(item.Location);
+                items.Remove(item);
+            }
         }
     }
 

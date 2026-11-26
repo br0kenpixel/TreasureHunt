@@ -197,6 +197,8 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
         return removed;
     }
 
+    public bool RemoveMarker(Location location) => RemoveMarker(location.Latitude, location.Longitude);
+
     void Awake()
     {
         Build();
@@ -446,18 +448,18 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
         slotTiles.Clear();
 
         for (int dy = -halfRows; dy <= halfRows; dy++)
-        for (int dx = -halfCols; dx <= halfCols; dx++)
-        {
-            var rt = CreateChild($"Tile {dx},{dy}", tileLayer);
-            rt.pivot = new Vector2(0f, 1f); // top-left, like tile coordinates
-            rt.sizeDelta = new Vector2(tileDisplaySize, tileDisplaySize);
-            rt.anchoredPosition = new Vector2(dx * tileDisplaySize, -dy * tileDisplaySize);
+            for (int dx = -halfCols; dx <= halfCols; dx++)
+            {
+                var rt = CreateChild($"Tile {dx},{dy}", tileLayer);
+                rt.pivot = new Vector2(0f, 1f); // top-left, like tile coordinates
+                rt.sizeDelta = new Vector2(tileDisplaySize, tileDisplaySize);
+                rt.anchoredPosition = new Vector2(dx * tileDisplaySize, -dy * tileDisplaySize);
 
-            var image = rt.gameObject.AddComponent<RawImage>();
-            image.raycastTarget = false;
-            slots.Add(image);
-            slotTiles.Add(NoTile);
-        }
+                var image = rt.gameObject.AddComponent<RawImage>();
+                image.raycastTarget = false;
+                slots.Add(image);
+                slotTiles.Add(NoTile);
+            }
     }
 
     void AssignTiles()
@@ -465,36 +467,36 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
         int n = 1 << centerZoom;
         int i = 0;
         for (int dy = -halfRows; dy <= halfRows; dy++)
-        for (int dx = -halfCols; dx <= halfCols; dx++, i++)
-        {
-            var image = slots[i];
-            int y = centerTile.y + dy;
-            if (y < 0 || y >= n)
+            for (int dx = -halfCols; dx <= halfCols; dx++, i++)
             {
-                // Above the top or below the bottom edge of the world map.
-                image.enabled = false;
-                slotTiles[i] = NoTile;
-                continue;
-            }
+                var image = slots[i];
+                int y = centerTile.y + dy;
+                if (y < 0 || y >= n)
+                {
+                    // Above the top or below the bottom edge of the world map.
+                    image.enabled = false;
+                    slotTiles[i] = NoTile;
+                    continue;
+                }
 
-            int x = ((centerTile.x + dx) % n + n) % n; // wrap around at longitude ±180
-            var tile = new Vector3Int(x, y, centerZoom);
-            slotTiles[i] = tile;
-            image.enabled = true;
+                int x = ((centerTile.x + dx) % n + n) % n; // wrap around at longitude ±180
+                var tile = new Vector3Int(x, y, centerZoom);
+                slotTiles[i] = tile;
+                image.enabled = true;
 
-            if (cache.TryGetValue(tile, out var texture))
-            {
-                image.texture = texture;
-                image.color = Color.white;
+                if (cache.TryGetValue(tile, out var texture))
+                {
+                    image.texture = texture;
+                    image.color = Color.white;
+                }
+                else
+                {
+                    image.texture = null;
+                    image.color = LoadingColor;
+                    if (loading.Add(tile))
+                        StartCoroutine(Download(tile));
+                }
             }
-            else
-            {
-                image.texture = null;
-                image.color = LoadingColor;
-                if (loading.Add(tile))
-                    StartCoroutine(Download(tile));
-            }
-        }
 
         TrimCache();
     }
@@ -616,12 +618,12 @@ public class MapView : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, ID
         var center = new Vector2(radius, radius);
         var pixels = new Color32[size * size];
         for (int y = 0; y < size; y++)
-        for (int x = 0; x < size; x++)
-        {
-            float distance = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), center);
-            byte alpha = (byte)(Mathf.Clamp01(radius - distance) * 255f);
-            pixels[y * size + x] = new Color32(255, 255, 255, alpha);
-        }
+            for (int x = 0; x < size; x++)
+            {
+                float distance = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), center);
+                byte alpha = (byte)(Mathf.Clamp01(radius - distance) * 255f);
+                pixels[y * size + x] = new Color32(255, 255, 255, alpha);
+            }
 
         var texture = new Texture2D(size, size, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp };
         texture.SetPixels32(pixels);
