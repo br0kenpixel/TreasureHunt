@@ -13,6 +13,7 @@ public class GpsDemoSceneLogic : MonoBehaviour
     public int randomPointCount = 5;
     public float randomPointMinMeters = 30f;
     public float randomPointMaxMeters = 150f;
+    public float minItemSeparationMeters = 25f;
 
     private GeolocationService geoSvc;
     private IItemSpawner itemSpawner;
@@ -26,7 +27,7 @@ public class GpsDemoSceneLogic : MonoBehaviour
             mapView = FindAnyObjectByType<MapView>();
 
         geoSvc = new();
-        itemSpawner = new GeolocationBasedItemSpawner(geoSvc);
+        itemSpawner = new GeolocationBasedItemSpawner(geoSvc, minItemSeparationMeters);
 
         Invoke(nameof(GenerateMapPoints), 10f);
     }
