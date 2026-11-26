@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using UnityEngine;
 using UnityEngine.Android;
 
@@ -7,6 +8,18 @@ public sealed record Location
     public float Latitude;
     public float Longitude;
     public float AccuracyMeters;
+
+    public override string ToString()
+    {
+        string coordinates = string.Format(CultureInfo.InvariantCulture, "{0:F6}, {1:F6}", Latitude, Longitude);
+
+        if (AccuracyMeters == 0)
+        {
+            return coordinates;
+        }
+
+        return string.Format(CultureInfo.InvariantCulture, "{0} (±{1:F0} m)", coordinates, AccuracyMeters);
+    }
 }
 
 public sealed class GeolocationService
